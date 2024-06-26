@@ -1,0 +1,1733 @@
+---
+title: "SVA null tests and co-occurrence analyses"
+author: "Laurane Mangé"
+date: "2024-05-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## SVA null tests and co-occurrence analyses : Code used to analyses data and produce the corresponding figures
+
+This document gives the code used to produce the analyses and figures pertaining to the null tests and co-occurrence analyses of SVA using the sigvar R package. All file paths used are to be modified according to the user's working directory.
+
+## Libraries necessary
+
+```{r libraries, warning = FALSE, message = FALSE}
+library("FAVA")
+library(sigvar)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(stringr)
+library(patchwork)
+library(MetBrewer)
+library(tidyr)
+library(forcats)
+library(viridis)
+library(scales)
+library(ggtext)
+library(text2vec)
+library(compositions) #for fitDirichlet
+library(data.table)
+library(varhandle)
+library(ggplotify)
+library(forcats)
+library(RColorBrewer)
+library(readxl)
+```
+
+## Null tests : Riva et al. data
+
+The first version of SVA null test is performed using spontaneous liver and lung mice tumors from the Riva et al. 2020 dataset (<https://www.nature.com/articles/s41588-020-0692-4>). This test is performed by separating, for each organ, the spontaneous tumors in 2 random groups and comparing the across-sample heterogeneity and within-sample diversity of those 2 groups using the Pvalues given by the `sigboot` function of the sigvar package. Since for each organ, both random groups are composed of samples coming from the same population (spontaneous mice tumors), the Pvalues obtained after comparison should be non-significant 95% of the time.
+
+We start with the spontaneous liver tumors. The `sigboot` function used for SVA has a `S` parameter, for which we need the `mSBSs.rds` file given by Riva and colleagues.
+
+```{r riva nulltest liver example}
+set.seed(1)
+riva_sig_defs = read_rds("./mSBSs.rds")
+sigs = colnames(mutsig_carcinogens_mice_SBS)[2:12]
+SBSmm_cossim <- sigvar::cossim(riva_sig_defs)[sigs, sigs] #matrix for the S parameter in the sigboot function
+```
+
+We then select the spontaneous liver samples and shuffle them randomly with replacement (similar to bootstrapping) as we have a small number of spontaneous samples.
+
+```{r shuffle bootstrap}
+
+# Selecting the spontaneous liver samples
+liver_spont_nulltest <- mutsig_carcinogens_mice_SBS[mutsig_carcinogens_mice_SBS$Tissue=="liver",] %>% filter(str_detect(Sample,"SPONT"))
+# Shuffling them randomly
+liver_spont_nulltest <- liver_spont_nulltest[sample(nrow(liver_spont_nulltest),replace=TRUE), ]
+```
+
+We can now separate the shuffled samples in 2 subgroups : 1 for the first half and 2 for the second.
+
+```{r assign subgroups}
+# Putting the top half in subgroup 1 and the bottom half in subgroup 2
+liver_spont_nulltest["subgroup"] <- c(1,1,1,1,1,2,2,2,2,2,2)
+```
+
+We now have the necessary data to perform SVA using the `sigboot` function and statistically compare the mean within-sample diversity and across-sample heterogeneity of the 2 subgroups of spontaneous liver samples.
+
+```{r perform SVA nulltest ex liver}
+# Performing SVA using the sigboot function
+sigboot_liver_spont <- sigboot(sig_activity = liver_spont_nulltest[,c(48,2:12)],
+                               K=11,
+                               n_replicates = 1000, S = SBSmm_cossim,
+                               group = "subgroup", seed=1,
+                               alternative = "greater")
+# Observing the results of the analysis
+sigboot_liver_spont$observed_difference 
+sigboot_liver_spont$P_values
+sigboot_liver_spont$bootstrap_distribution_plot
+# Attributing within-sample diversity and across-sample heterogeneity values to the samples in each subgroup
+sigvar_values <- sigvar(sig_activity = liver_spont_nulltest[,c(48,2:12)],
+        K=11, S = SBSmm_cossim,
+        group = "subgroup")
+liver_spont_nulltest["within"] <- sapply(1:nrow(liver_spont_nulltest), function(i){ het_mean(liver_spont_nulltest[i,2:12], K = 11, S = SBSmm_cossim)})
+liver_spont_nulltest["across"] <- c(rep(round(as.numeric(sigvar_values[1,2]),3),5) ,rep(round(as.numeric(sigvar_values[2,2]),3),6))
+```
+
+We can observe that the Pvalues are non-significant. This seems to indicate that SVA does not produce false positives. To confirm this, we need to perform this analysis multiple times. We repeat this process 1000 times and regroup all the results in a dataframe containing one row per repetition. We perform sampling with replacement (similar to bootstrapping) before each separation of the spontaneous samples.
+
+```{r riva nulltest liver loop, echo=T, results='hide'}
+
+rep_1000_liver_spont_boot <- data.frame(matrix(NA, nrow = 1000, ncol = 8))
+for(i in 1:1000){
+    set.seed(i)
+    liver_spont_nulltest <- mutsig_carcinogens_mice_SBS[mutsig_carcinogens_mice_SBS$Tissue=="liver",] %>% filter(str_detect(Sample,"SPONT"))
+    liver_spont_nulltest <- liver_spont_nulltest[sample(nrow(liver_spont_nulltest),replace=TRUE), ]
+    liver_spont_nulltest["subgroup"] <- c(1,1,1,1,1,2,2,2,2,2,2)
+    sigboot_liver_spont <- sigboot(sig_activity = liver_spont_nulltest[,c(48,2:12)], 
+                                   K=11,
+                                   n_replicates = 1000, S = SBSmm_cossim,
+                                   group = "subgroup", seed=1,
+                                   alternative = "greater")
+    sigvar_values <- sigvar(sig_activity = liver_spont_nulltest[,c(48,2:12)], 
+                            K=11,
+                            S = SBSmm_cossim,
+                            group = "subgroup")
+
+    rep_1000_liver_spont_boot[i,] <- c(paste(split(liver_spont_nulltest$Sample,f=liver_spont_nulltest$subgroup)[1], sep = ", "),paste(split(liver_spont_nulltest$Sample,f=liver_spont_nulltest$subgroup)[2], sep = ", "),sigboot_liver_spont$P_values[1,2:3],sigvar_values[1,2:3],sigvar_values[2,2:3])
+    print(i)
+}
+liver_spont_nulltest["within"] <- sapply(1:nrow(liver_spont_nulltest), function(i){ het_mean(liver_spont_nulltest[i,2:12], K = 11, S = SBSmm_cossim)})
+liver_spont_nulltest["across"] <- c(rep(round(as.numeric(sigvar_values[1,2]),3),5) ,rep(round(as.numeric(sigvar_values[2,2]),3),6))
+
+print(rep_1000_liver_spont_boot[1000,]$X3)
+print(rep_1000_liver_spont_boot[1000,]$X4)
+
+```
+
+We can count how many Pvalues are significant (i.e. bellow 0.05) out of the 1000 repetitions.
+
+```{r riva nulltest liver Pvals}
+table(rep_1000_liver_spont_boot$X3<=0.05) # Across-sample heterogeneity Pvalues
+table(rep_1000_liver_spont_boot$X4<=0.05) # Mean within-sample diversity Pvalues
+```
+
+As approximately 5% of the Pvalues are significant, we can confirm that SVA using `sigboot` passes the null test (using the spontaneous liver samples so far) and does not introduce false positives.
+
+We can show the Pvalue distribution for each type of diversity, as well as a violin plot of the last repetition to serve as a visual example of the test performed. The violin plot shows both subgroups and gives the across-sample heterogeneity and within-sample diversity of each subgroup. The Pvalues associated to the comparison of both types of diversities between the 2 subgroups can be obtained in the last row of the `rep_1000_liver_spont_boot` dataframe (columns 3 and 4).
+
+```{r riva nulltest liver plots}
+liver_violin <- liver_spont_nulltest %>%
+                    ggplot(aes(x=within, y=as.factor(across), fill="#3A488AFF"))+
+                    geom_violin(color = NA, alpha = 0.7)+
+                    geom_hline(yintercept = 1,alpha = 0.3, linewidth = 0.5)+
+                    geom_hline(yintercept = 2,alpha = 0.3, linewidth = 0.5)+
+                    geom_vline(xintercept = lapply(liver_spont_nulltest[1:5,49],mean)[[1]],alpha = 0.3, linewidth = 0.5)+
+                    geom_vline(xintercept = lapply(liver_spont_nulltest[6:11,49],mean)[[1]],alpha = 0.3, linewidth = 0.5)+
+                    theme_bw() + 
+                    theme(panel.grid = element_blank(),
+                          legend.position = "none") +
+                    stat_summary(fun = "mean", 
+                                 geom = "point",
+                                 color = "black",
+                                 size = 5)+
+                    scale_color_manual(values = c("#1D2E76","black")) +
+                    scale_fill_manual(values = c("#1D2E76", "black")) +
+                    scale_x_continuous(breaks = c(0.05, 0.1, 0.15), limits = c(0.045, 0.16)) +
+                    theme(panel.grid = element_blank(),
+                          strip.background = element_blank(),
+                          strip.text = element_markdown(size = 9),
+                          legend.position = "none",
+                          axis.title.y = element_markdown(),
+                          axis.text.y = element_markdown()) +
+                    xlab("Within-sample diversity") +
+                    ylab("Across-sample heterogeneity")
+
+liver_within_distrib <- rep_1000_liver_spont_boot %>% 
+                          ggplot(aes(x=as.numeric(X4))) + 
+                          geom_histogram(color="dark gray", fill="dark gray", stat = "count") +
+                          scale_x_continuous(limits = c(0,1), breaks = seq(0,1,by=0.1)) +
+                          scale_y_continuous(limits = c(0,7), breaks = seq(0,7,by=1)) +
+                          theme(panel.grid = element_blank(),
+                                strip.background = element_blank(),
+                                strip.text = element_markdown(size = 9),
+                                legend.position = "none",
+                                axis.title.y = element_markdown(),
+                                axis.text.y = element_markdown()) +
+                          theme_bw() + 
+                          theme(panel.grid = element_blank()) +
+                          xlab("Within-sample diversity P values") +
+                          ylab("Count")
+
+liver_across_distrib <- rep_1000_liver_spont_boot %>% 
+                          ggplot(aes(x=as.numeric(X3))) + 
+                          geom_histogram(color="dark gray", fill="dark gray", stat = "count") +
+                          scale_x_continuous(limits = c(0,1), breaks = seq(0,1,by=0.1)) +
+                          scale_y_continuous(limits = c(0,7), breaks = seq(0,7,by=1)) +
+                          theme(panel.grid = element_blank(),
+                                strip.background = element_blank(),
+                                strip.text = element_markdown(size = 9),
+                                legend.position = "none",
+                                axis.title.y = element_markdown(),
+                                axis.text.y = element_markdown()) +                        
+                          theme_bw() + 
+                          theme(panel.grid = element_blank()) +
+                          xlab("Across-sample heterogeneity P values") +
+                          ylab("Count")
+
+
+liver_across_distrib + liver_within_distrib + liver_violin
+```
+
+We can observe that the Pvalue distributions are uniform.
+
+We now repeat this analysis for the spontaneous lung tumors.
+
+```{r riva nulltest lung loop, echo=T, results='hide'}
+
+rep_1000_lung_spont_boot <- data.frame(matrix(NA, nrow = 1000, ncol = 8))
+for(i in 1:1000){
+    set.seed(i)
+    lung_spont_nulltest <- mutsig_carcinogens_mice_SBS[mutsig_carcinogens_mice_SBS$Tissue=="lung",] %>% filter(str_detect(Sample,"SPONT"))
+    lung_spont_nulltest <- lung_spont_nulltest[sample(nrow(lung_spont_nulltest),replace=TRUE), ]
+    lung_spont_nulltest["subgroup"] <- c(1,1,1,1,1,1,2,2,2,2,2,2)
+    sigboot_lung_spont <- sigboot(sig_activity = lung_spont_nulltest[,c(48,2:12)], 
+                                   K=11,
+                                   n_replicates = 1000, S = SBSmm_cossim,
+                                   group = "subgroup", seed=1,
+                                   alternative = "greater")
+    sigvar_values <- sigvar(sig_activity = lung_spont_nulltest[,c(48,2:12)], 
+                            K=11,
+                            S = SBSmm_cossim,
+                            group = "subgroup")
+
+    rep_1000_lung_spont_boot[i,] <- c(paste(split(lung_spont_nulltest$Sample,f=lung_spont_nulltest$subgroup)[1], sep = ", "),paste(split(lung_spont_nulltest$Sample,f=lung_spont_nulltest$subgroup)[2], sep = ", "),sigboot_lung_spont$P_values[1,2:3],sigvar_values[1,2:3],sigvar_values[2,2:3])
+    print(i)
+}
+lung_spont_nulltest["within"] <- sapply(1:nrow(lung_spont_nulltest), function(i){ het_mean(lung_spont_nulltest[i,2:12], K = 11, S = SBSmm_cossim)})
+lung_spont_nulltest["across"] <- c(rep(round(as.numeric(sigvar_values[1,2]),3),6) ,rep(round(as.numeric(sigvar_values[2,2]),3),6))
+
+print(rep_1000_lung_spont_boot[1000,]$X3)
+print(rep_1000_lung_spont_boot[1000,]$X4)
+
+```
+
+Once again we can check the number of significant Pvalues for both types of variabilities.
+
+```{r riva nulltest lung results}
+table(rep_1000_lung_spont_boot$X3<=0.05) # Across-sample heterogeneity Pvalues
+table(rep_1000_lung_spont_boot$X4<=0.05) # Within-sample diversity Pvalues
+```
+
+Once again, approximately 5% of them are significant, which is acceptable for the null test.
+
+We now plot the same 3 graphs as for the liver samples.
+
+```{r riva nulltest lung plots}
+
+lung_violin <- lung_spont_nulltest %>%
+  ggplot(aes(x=within, y=as.factor(across), fill="#3A488AFF")) +
+  geom_violin(color = NA, alpha = 0.7)+
+  geom_hline(yintercept = 1,alpha = 0.3, linewidth = 0.5)+
+  geom_hline(yintercept = 2,alpha = 0.3, linewidth = 0.5)+
+  geom_vline(xintercept = lapply(lung_spont_nulltest[1:6,49],mean)[[1]],alpha = 0.3, linewidth = 0.5)+
+  geom_vline(xintercept = lapply(lung_spont_nulltest[7:12,49],mean)[[1]],alpha = 0.3, linewidth = 0.5)+
+  theme_bw() + 
+  theme(panel.grid = element_blank(),
+        legend.position = "none") +
+  stat_summary(fun = "mean",
+               geom = "point",
+               color = "black",
+               size = 5)+
+  scale_color_manual(values = c("#1D2E76","black")) +
+  scale_fill_manual(values = c("#1D2E76", "black")) +
+  theme(panel.grid = element_blank(),
+        strip.background = element_blank(),
+        strip.text = element_markdown(size = 9),
+        legend.position = "none",
+        axis.title.y = element_markdown(),
+        axis.text.y = element_markdown()) +
+  xlab("Within-sample diversity") +
+  ylab("Across-sample heterogeneity")
+
+lung_within_distrib <- rep_1000_lung_spont_boot %>% 
+                          ggplot(aes(x=as.numeric(X4))) + 
+                          geom_histogram(color="dark gray", fill="dark gray", stat = "count") +
+                          scale_x_continuous(limits = c(0,1), breaks = seq(0,1,by=0.1)) +
+                          scale_y_continuous(limits = c(0,7), breaks = seq(0,7,by=1)) +
+                          theme(panel.grid = element_blank(),
+                                strip.background = element_blank(),
+                                strip.text = element_markdown(size = 9),
+                                legend.position = "none",
+                                axis.title.y = element_markdown(),
+                                axis.text.y = element_markdown()) +
+                          theme_bw() + 
+                          theme(panel.grid = element_blank()) +
+                          xlab("Within-sample diversity P values") +
+                          ylab("Count")
+
+lung_across_distrib <- rep_1000_lung_spont_boot %>% 
+                          ggplot(aes(x=as.numeric(X3))) + 
+                          geom_histogram(color="dark gray", fill="dark gray", stat = "count") +
+                          scale_x_continuous(limits = c(0,1), breaks = seq(0,1,by=0.1)) +
+                          scale_y_continuous(limits = c(0,7), breaks = seq(0,7,by=1)) +
+                          theme(panel.grid = element_blank(),
+                                strip.background = element_blank(),
+                                strip.text = element_markdown(size = 9),
+                                legend.position = "none",
+                                axis.title.y = element_markdown(),
+                                axis.text.y = element_markdown()) +
+                          theme_bw() + 
+                          theme(panel.grid = element_blank()) +
+                          xlab("Across-sample heterogeneity P values") +
+                          ylab("Count")
+
+lung_across_distrib + lung_within_distrib + lung_violin
+```
+```{r riva nulltest, echo=FALSE}
+#ggriva <- (lung_across_distrib + lung_within_distrib + lung_violin) / (liver_across_distrib + liver_within_distrib + liver_violin)
+#ggsave("FigS_riva_nulltest_boot.svg",ggriva + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(face = 'bold')), height = 3*2,width = 3*3.5)
+```
+
+The Pvalue distributions are uniform for the lung samples as well.
+
+## Null tests : Dirichlet distribution
+
+Another version of SVA null test was performed using a Dirichlet distribution fitted on relative mutational signature data in non-smokers unexposed to second-hand smoke (Zhang et al. 2021 ; <https://www.nature.com/articles/s41588-021-00920-0>).
+
+The first step is to retrieve the corresponding data and preparing it for SVA. This includes defining the S parameter for the `sigboot` function.
+
+```{r diri fetch data}
+# Defining the data
+sig_df <- read.delim("~/Hallmarks/sherlock_232_SBS_Signature_Ratio.txt")
+
+sig_df <- sig_df %>% mutate(Subject = stringr::str_sub(Sample, 1, 9), 
+                            .after = "Sample")
+meta_df = read_excel("41588_2021_920_MOESM4_ESM.xlsx", 
+                            sheet = "Supplementary Table 1", skip = 1)
+
+sig_defs = read_excel("41588_2021_920_MOESM4_ESM.xlsx", 
+                            sheet = "Supplementary Table 7a", skip = 2)
+
+zhang = right_join(meta_df, sig_df)
+zhang = zhang[which(!is.na(zhang$passive_smoking)),]
+zhang$passive_smoking = ifelse(zhang$passive_smoking == "N", "Non-smoker", "Passive smoker")
+
+signatures = colnames(sig_df)[-c(1:2)]
+zhang_sig_cossim <- text2vec::sim2(x = sig_defs %>% select(all_of(signatures)) %>% 
+                                     as.matrix %>% t,
+                                   method = "cosine")
+
+zhang_sig_cossim = round(zhang_sig_cossim, 10) # S parameter for the sigboot function
+```
+
+The next step is to compute α, a vector containing the average of each signature for non-smokers. 
+
+```{r compute alpha}
+zhang_ns_means <- lapply(zhang %>% filter(passive_smoking=="Non-smoker") %>% select(26:39), mean) # alpha vector for the Dirichlet distribution = mean of each signature
+```
+
+This vector is then given as input to the method `rDirichlet.acomp` (from R package compositions) to generate 213 samples, just as in the original dataset. 
+
+```{r diri generate samples}
+set.seed(1)
+zhang_diri <- rDirichlet.acomp(nrow(zhang),zhang_ns_means) # Samples generated according to the Dirichlet distribution
+```
+
+Just as with the previous null test, we perform the following steps 1000 times : shuffle the samples, seperate them in 2 subgroups, use `sigboot` to statistically compare the across- and mean within-sample variabilities of both subgroups. The 2 subgroups contain the same number of samples as the non-smokers (149 samples corresponding to subgroup 1) vs passive smokers (64 samples corresponding to subgroup 2) from the original data. 
+
+```{r nulltest diri loop, echo=T, results='hide'}
+
+# Performing the analysis with 1000 repetitions
+rep_1000_zhang_diri_boot <- data.frame(matrix(NA, nrow = 1000, ncol = 8))
+for(i in 1:1000){
+  set.seed(i)
+  zhang_diri_nulltest <- as.data.frame(zhang_diri) 
+  zhang_diri_nulltest <- as.data.frame(zhang_diri_nulltest[sample(nrow(zhang_diri_nulltest),replace=TRUE), ])
+  zhang_diri_nulltest["subgroup"] <- c(rep(1,nrow(zhang %>% filter(passive_smoking=="Non-smoker"))),rep(2,nrow(zhang %>% filter(passive_smoking=="Passive smoker"))))
+  sigboot_zhang_diri <- sigboot(sig_activity = zhang_diri_nulltest[,c(15,1:14)], 
+                                   K=14,
+                                   n_replicates = 1000, S = zhang_sig_cossim,
+                                   group = "subgroup", seed=1,
+                                   alternative = "greater")
+  sigvar_values <- sigvar(sig_activity = zhang_diri_nulltest[,c(15,1:14)], 
+                            K=14,
+                            S = zhang_sig_cossim,
+                            group = "subgroup")
+  rep_1000_zhang_diri_boot[i,] <- c(sigvar_values$subgroup,sigboot_zhang_diri$P_values[1,2:3],sigvar_values[1,2:3],sigvar_values[2,2:3])
+  print(i)
+}
+zhang_diri_nulltest["within"] <- sapply(1:nrow(zhang_diri_nulltest), function(i){ het_mean(zhang_diri_nulltest[i,1:14], K = 14, S = zhang_sig_cossim)})
+zhang_diri_nulltest["across"] <- c(rep(round(as.numeric(sigvar_values[1,2]),3),nrow(zhang %>% filter(passive_smoking=="Non-smoker"))) ,rep(round(as.numeric(sigvar_values[2,2]),3),nrow(zhang %>% filter(passive_smoking=="Passive smoker"))))
+
+print(rep_1000_zhang_diri_boot[1000,]$X3)
+print(rep_1000_zhang_diri_boot[1000,]$X4)
+
+```
+
+As done with the mice data from Riva and colleagues, we check the number of significant Pvalues obtained for both across-sample heterogeneity and within-sample diversity.
+
+```{r nulltest diri tables}
+table(rep_1000_zhang_diri_boot$X3<=0.05) 
+table(rep_1000_zhang_diri_boot$X4<=0.05)
+```
+
+We can observe that the number of significant Pvalues is approximately 5% as well.
+
+We can represent the same distributions and violin plot as with the previous null test analysis.
+
+```{r nulltest diri plots}
+diri_violin <- zhang_diri_nulltest %>%
+  ggplot(aes(x=within, y=as.factor(across), fill="#264653"))+
+  geom_violin(color = NA, alpha = 0.7)+
+  geom_hline(yintercept = 1,alpha = 0.3, linewidth = 0.5)+
+  geom_hline(yintercept = 2,alpha = 0.3, linewidth = 0.5)+
+  geom_vline(xintercept = mean(zhang_diri_nulltest[1:nrow(zhang %>% filter(passive_smoking=="Non-smoker")),16]),alpha = 0.3, linewidth = 0.5)+
+  geom_vline(xintercept = mean(zhang_diri_nulltest[1+nrow(zhang %>% filter(passive_smoking=="Non-smoker")):nrow(zhang)-1,16]),alpha = 0.3, linewidth = 0.5)+
+  theme_bw() + 
+  theme(panel.grid = element_blank(),
+        legend.position = "none") +
+  stat_summary(fun = "mean",
+               geom = "point",
+               color = "black",
+               size = 5)+
+  scale_color_manual(values = c("#264653","black")) +
+  scale_fill_manual(values = c("#264653", "black")) +
+  theme(panel.grid = element_blank(),
+        strip.background = element_blank(),
+        strip.text = element_markdown(size = 9),
+        legend.position = "none",
+        axis.title.y = element_markdown(),
+        axis.text.y = element_markdown()) +
+  xlab("Within-sample diversity") +
+  ylab("Across-sample heterogeneity")
+
+diri_within_distrib <- rep_1000_zhang_diri_boot %>% 
+  ggplot(aes(x=as.numeric(X4))) + 
+  geom_histogram(color="gray", fill="gray", stat = "count") +
+  scale_x_continuous(limits = c(0,1), breaks = seq(0,1,by=0.1)) +
+  scale_y_continuous(limits = c(0,7), breaks = seq(0,7,by=1)) +
+  theme_bw() + 
+  theme(panel.grid = element_blank(),
+        strip.background = element_blank(),
+        strip.text = element_markdown(size = 9),
+        legend.position = "none",
+        axis.title.y = element_markdown(),
+        axis.text.y = element_markdown()) +
+  theme(panel.grid = element_blank()) +
+  xlab("Within-sample diversity P values") +
+  ylab("Count")
+
+diri_across_distrib <-rep_1000_zhang_diri_boot %>% 
+  ggplot(aes(x=as.numeric(X3))) + 
+  geom_histogram(color="gray", fill="gray", stat = "count") +
+  scale_x_continuous(limits = c(0,1), breaks = seq(0,1,by=0.1)) +
+  scale_y_continuous(limits = c(0,7), breaks = seq(0,7,by=1)) +
+  theme_bw() + 
+  theme(panel.grid = element_blank(),
+        strip.background = element_blank(),
+        strip.text = element_markdown(size = 9),
+        legend.position = "none",
+        axis.title.y = element_markdown(),
+        axis.text.y = element_markdown()) +
+  theme(panel.grid = element_blank()) +
+  xlab("Across-sample heterogeneity P values") +
+  ylab("Count")
+
+diri_across_distrib + diri_within_distrib + diri_violin
+```
+```{r diri plot, echo=FALSE}
+#ggdiri = (diri_across_distrib + diri_within_distrib + diri_violin) 
+#ggsave("FigS_diri_boot.svg",ggdiri + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(face = 'bold')), height = 3,width = 3*3.5)
+
+```
+
+We find once again that Pvalue distributions are uniform, as expected under the null hypothesis.
+
+
+## Co-occurrence analyses
+
+Analyzing the co-occurrence of mutational signatures can illustrate how carcinogens tend to affect endogenous processes, as well as which specific signatures or combination of signatures drive patterns. 
+
+For each dataset used in this study, we represented a co-occurrence matrix of mutational signature proportions in samples from populations not exposed vs exposed to known or suspected carcinogens. What we tend to observe is an increase of mutational signature proportions for signatures already present in non-exposed populations (in addition to the emergence of certain new signatures absent in non-exposed populations). 
+
+We first represented the co-occurence of signatures in mice liver and lung tumors. We compare spontaneous tumors and tumors resulting from exposure to known or suspected carcinogens (Riva et al. 2020).
+
+For this figure, we first retrieve the mutational signature proportions for spontaneous liver samples. As low signatures are usually considered inaccurate (they can be bellow the resolution of algorithms that assign mutational signatures), we only consider the ones above 10% to be different from 0. We then transform the proportions to binary values (0 for null and 1 for non null) according to the previously defined threshold.
+
+```{r cooc riva binary}
+## liver spontaneous tumor samples
+riva_spont_liver <- mutsig_carcinogens_mice_SBS %>% filter(str_detect(Sample,"SPONT"), str_detect(Sample,"LIVER")) %>% select(c(1:12))
+sample_size_spont_liver <- nrow(riva_spont_liver)
+riva_spont_liver[2:12] <- riva_spont_liver[2:12] > 0.1
+riva_spont_liver[2:12] <- riva_spont_liver[2:12]*1
+```
+
+We remove signatures `mSBS42` and `mSBS_N2` as they are null for all samples.
+
+```{r remove 2 null sigs}
+#remove sigs mSBS42 and mSBS_N2 (they are empty)
+riva_spont_liver <- riva_spont_liver %>% select(!c("mSBS42","mSBS_N2"))
+```
+
+Next, we regroup the signatures in pairs and determine if each pair is present (both have value 1 in `riva_spont_liver`) or not in a given sample. If 2 signatures are present in a sample, they are considered to co-occur. We count the pairs of co-occurring signatures across all spontaneous liver samples.
+
+```{r cooc}
+all_combo <- riva_spont_liver %>% tidyr::expand(sig1=unique(colnames(riva_spont_liver[2:10])),sig2=unique(colnames(riva_spont_liver[2:10])))
+
+sample_sig_liver <- reshape2::melt(riva_spont_liver, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_liver$Signature <- unfactor(sample_sig_liver$Signature)
+sample_sig_liver <- sample_sig_liver[order(sample_sig_liver$Sample, decreasing = FALSE),] 
+
+cooc_sig_liver <- sample_sig_liver %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_liver_count <- cooc_sig_liver %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_liver_count <- cooc_sig_liver_count %>% ungroup()
+cooc_sig_liver_count$sig1 <- unlist(cooc_sig_liver_count$sig1)
+cooc_sig_liver_count$sig2 <- unlist(cooc_sig_liver_count$sig2)
+cooc_sig_liver_count <- cooc_sig_liver_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_liver_count$n, cooc_sig_liver_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_liver_count$sig1)))
+cooc_sig_liver_count['max'] <- l
+```
+
+We then consider co-occurrence through proportions instead of counts. For each pair of mutational signatures, we divide the number of samples presenting the co-occurrence of interest by the total number of samples.
+
+```{r cooc prop}
+
+cooc_sig_liver_count <- cooc_sig_liver_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(riva_spont_liver),3))) #prop will be out of the total nb of samples
+```
+
+Finally, we format the resulting co-occurrence proportions in a triangular matrix and plot it.
+
+```{r cooc matrix and plot}
+
+mat_liver <- matrix(cooc_sig_liver_count$prop,nrow=length(unique(cooc_sig_liver_count$sig1)),ncol=length(unique(cooc_sig_liver_count$sig2)),
+              dimnames=list(
+                sig1=unique(cooc_sig_liver_count$sig1),
+                sig2=unique(cooc_sig_liver_count$sig2)
+              ))
+
+
+order_spont_liver <- c("mSBS1", "mSBS5", "mSBS40", "mSBS12", "mSBS17", "mSBS18", "mSBS19", "mSBS_N1", "mSBS_N3")
+
+mat_liver <- mat_liver[order_spont_liver , order_spont_liver]
+
+mat_liver[lower.tri(mat_liver)] <- NA
+
+mat_liver <- reshape2::melt(mat_liver, na.rm = TRUE)
+mat_liver <- merge(mat_liver, cooc_sig_liver_count, by=c('sig1','sig2'))
+
+
+plot_liver <- ggplot(mat_liver, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) + 
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in spontaneous liver tumors (n = ",sample_size_spont_liver," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=8),legend.text = element_text(size=8),legend.spacing.y =unit(0.1, 'cm'),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=9)) 
+
+plot_liver
+```
+
+We can observe the mutational signature co-occurrences in spontaneous liver samples. 
+
+We now repeat this analysis on spontaneous lung samples.
+
+```{r cooc spont lung}
+## lung spontaneous tumor samples
+riva_spont_lung <- mutsig_carcinogens_mice_SBS %>% filter(str_detect(Sample,"SPONT"), str_detect(Sample,"LUNG")) %>% select(c(1:12))
+sample_size_spont_lung <- nrow(riva_spont_lung)
+riva_spont_lung[2:12] <- riva_spont_lung[2:12] > 0.1
+riva_spont_lung[2:12] <- riva_spont_lung[2:12]*1
+
+#remove sigs mSBS42 and mSBS_N2 (they are empty)
+riva_spont_lung <- riva_spont_lung %>% select(!c("mSBS42","mSBS_N2"))
+
+all_combo <- riva_spont_lung %>% tidyr::expand(sig1=unique(colnames(riva_spont_lung[2:10])),sig2=unique(colnames(riva_spont_lung[2:10])))
+
+sample_sig_lung <- reshape2::melt(riva_spont_lung, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_lung$Signature <- unfactor(sample_sig_lung$Signature)
+sample_sig_lung <- sample_sig_lung[order(sample_sig_lung$Sample, decreasing = FALSE),] 
+
+cooc_sig_lung <- sample_sig_lung %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_lung_count <- cooc_sig_lung %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_lung_count <- cooc_sig_lung_count %>% ungroup()
+cooc_sig_lung_count$sig1 <- unlist(cooc_sig_lung_count$sig1)
+cooc_sig_lung_count$sig2 <- unlist(cooc_sig_lung_count$sig2)
+cooc_sig_lung_count <- cooc_sig_lung_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_lung_count$n, cooc_sig_lung_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_lung_count$sig1)))
+cooc_sig_lung_count['max'] <- l
+
+cooc_sig_lung_count <- cooc_sig_lung_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(riva_spont_lung),3))) #prop will be out of the total nb of samples
+
+mat_lung <- matrix(cooc_sig_lung_count$prop,nrow=length(unique(cooc_sig_lung_count$sig1)),ncol=length(unique(cooc_sig_lung_count$sig2)),
+                    dimnames=list(
+                      sig1=unique(cooc_sig_lung_count$sig1),
+                      sig2=unique(cooc_sig_lung_count$sig2)
+                    ))
+
+order_spont_lung <- c("mSBS1", "mSBS5", "mSBS40", "mSBS12", "mSBS17", "mSBS18", "mSBS19", "mSBS_N1", "mSBS_N3")
+mat_lung <- mat_lung[order_spont_lung , order_spont_lung]
+
+mat_lung[lower.tri(mat_lung)] <- NA
+
+mat_lung <- reshape2::melt(mat_lung, na.rm = TRUE)
+mat_lung <- merge(mat_lung, cooc_sig_lung_count, by=c('sig1','sig2'))
+
+plot_lung <- ggplot(mat_lung, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in spontaneous lung tumors (n = ",sample_size_spont_lung," samples)")) +
+  scale_color_gradient(low="blue", high=" red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=8),legend.text = element_text(size=8),legend.spacing.y =unit(0.1, 'cm'),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=9))
+```
+
+We can now repeat this analysis on liver and lung samples from mice that were exposed to different substances and compare the co-occurrence of signatures with the spontaneous samples. We first consider all substances together.
+
+```{r cooc exposed mice}
+
+# liver exposed
+
+riva_exp_liver <- mutsig_carcinogens_mice_SBS %>% filter(str_detect(Sample,"LIVER"), !str_detect(Sample,"SPONT")) %>% select(c(1:12))
+sample_size_exp_liver <- nrow(riva_exp_liver)
+riva_exp_liver[2:12] <- riva_exp_liver[2:12] > 0.1
+riva_exp_liver[2:12] <- riva_exp_liver[2:12]*1
+
+#remove sigs mSBS42 and mSBS_N2 (they are empty)
+riva_exp_liver <- riva_exp_liver %>% select(!c("mSBS42","mSBS_N2"))
+
+all_combo <- riva_exp_liver %>% tidyr::expand(sig1=unique(colnames(riva_exp_liver[2:10])),sig2=unique(colnames(riva_exp_liver[2:10])))
+
+sample_sig_exp_liver <- reshape2::melt(riva_exp_liver, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_exp_liver$Signature <- unfactor(sample_sig_exp_liver$Signature)
+sample_sig_exp_liver <- sample_sig_exp_liver[order(sample_sig_exp_liver$Sample, decreasing = FALSE),] 
+
+cooc_sig_exp_liver <- sample_sig_exp_liver %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_exp_liver_count <- cooc_sig_exp_liver %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_exp_liver_count <- cooc_sig_exp_liver_count %>% ungroup()
+cooc_sig_exp_liver_count$sig1 <- unlist(cooc_sig_exp_liver_count$sig1)
+cooc_sig_exp_liver_count$sig2 <- unlist(cooc_sig_exp_liver_count$sig2)
+cooc_sig_exp_liver_count <- cooc_sig_exp_liver_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_exp_liver_count$n, cooc_sig_exp_liver_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_exp_liver_count$sig1)))
+cooc_sig_exp_liver_count['max'] <- l
+
+cooc_sig_exp_liver_count <- cooc_sig_exp_liver_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(riva_exp_liver),3))) #prop will be out of the total nb of samples
+
+mat_exp_liver <- matrix(cooc_sig_exp_liver_count$prop,nrow=length(unique(cooc_sig_exp_liver_count$sig1)),ncol=length(unique(cooc_sig_exp_liver_count$sig2)),
+              dimnames=list(
+                sig1=unique(cooc_sig_exp_liver_count$sig1),
+                sig2=unique(cooc_sig_exp_liver_count$sig2)
+              ))
+
+order_exp_liver <- c("mSBS1", "mSBS5", "mSBS40", "mSBS12", "mSBS17", "mSBS18", "mSBS19", "mSBS_N1", "mSBS_N3")
+mat_exp_liver <- mat_exp_liver[order_exp_liver , order_exp_liver]
+
+mat_exp_liver[lower.tri(mat_exp_liver)] <- NA
+
+mat_exp_liver <- reshape2::melt(mat_exp_liver, na.rm = TRUE)
+mat_exp_liver <- merge(mat_exp_liver, cooc_sig_exp_liver_count, by=c('sig1','sig2'))
+
+plot_exp_liver <- ggplot(mat_exp_liver, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  ggtitle(paste0("Co-occurrence of signatures in exposed liver tumors (n = ",sample_size_exp_liver," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=8),legend.text = element_text(size=8),legend.spacing.y =unit(0.1, 'cm'),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=9)) +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2))
+    
+# lung exposed
+
+riva_exp_lung <- mutsig_carcinogens_mice_SBS %>% filter(str_detect(Sample,"LUNG"), !str_detect(Sample,"SPONT")) %>% select(c(1:12))
+sample_size_exp_lung <- nrow(riva_exp_lung)
+riva_exp_lung[2:12] <- riva_exp_lung[2:12] > 0.1
+riva_exp_lung[2:12] <- riva_exp_lung[2:12]*1
+
+#remove sigs mSBS42 and mSBS_N2 (they are empty)
+riva_exp_lung <- riva_exp_lung %>% select(!c("mSBS42","mSBS_N2"))
+
+all_combo <- riva_exp_lung %>% tidyr::expand(sig1=unique(colnames(riva_exp_lung[2:10])),sig2=unique(colnames(riva_exp_lung[2:10])))
+
+sample_sig_exp_lung <- reshape2::melt(riva_exp_lung, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_exp_lung$Signature <- unfactor(sample_sig_exp_lung$Signature)
+sample_sig_exp_lung <- sample_sig_exp_lung[order(sample_sig_exp_lung$Sample, decreasing = FALSE),]
+
+cooc_sig_exp_lung <- sample_sig_exp_lung %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_exp_lung_count <- cooc_sig_exp_lung %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_exp_lung_count <- cooc_sig_exp_lung_count %>% ungroup()
+cooc_sig_exp_lung_count$sig1 <- unlist(cooc_sig_exp_lung_count$sig1)
+cooc_sig_exp_lung_count$sig2 <- unlist(cooc_sig_exp_lung_count$sig2)
+cooc_sig_exp_lung_count <- cooc_sig_exp_lung_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_exp_lung_count$n, cooc_sig_exp_lung_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_exp_lung_count$sig1)))
+cooc_sig_exp_lung_count['max'] <- l
+
+cooc_sig_exp_lung_count <- cooc_sig_exp_lung_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(riva_exp_lung),3))) #prop will be out of the total nb of samples
+
+mat_exp_lung <- matrix(cooc_sig_exp_lung_count$prop,nrow=length(unique(cooc_sig_exp_lung_count$sig1)),ncol=length(unique(cooc_sig_exp_lung_count$sig2)),
+                        dimnames=list(
+                          sig1=unique(cooc_sig_exp_lung_count$sig1),
+                          sig2=unique(cooc_sig_exp_lung_count$sig2)
+                        ))
+
+order_exp_lung <- c("mSBS1", "mSBS5", "mSBS40", "mSBS12", "mSBS17", "mSBS18", "mSBS19", "mSBS_N1", "mSBS_N3")
+mat_exp_lung <- mat_exp_lung[order_exp_lung , order_exp_lung]
+
+mat_exp_lung[lower.tri(mat_exp_lung)] <- NA
+
+mat_exp_lung <- reshape2::melt(mat_exp_lung, na.rm = TRUE)
+mat_exp_lung <- merge(mat_exp_lung, cooc_sig_exp_lung_count, by=c('sig1','sig2'))
+
+plot_exp_lung <- ggplot(mat_exp_lung, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in exposed lung tumors (n = ",sample_size_exp_lung," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=8),legend.text = element_text(size=8),legend.spacing.y =unit(0.1, 'cm'),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=9))
+
+
+(plot_lung + plot_exp_lung) / (plot_liver + plot_exp_liver)
+```
+```{r cooc riva plot, echo=FALSE}
+#ggrivaCooc <- (plot_lung + plot_exp_lung) / (plot_liver + plot_exp_liver)
+#ggsave("FigS_riva_cooc.svg",ggrivaCooc + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(face = 'bold')), height = 2*3,width = 3*3.5)
+```
+
+We can also observe the effects of a single substance as a more specific example : Primaclone (only used in liver samples).
+
+```{r cooc riva prima}
+# liver primaclone
+
+riva_Prima_liver <- mutsig_carcinogens_mice_SBS %>% filter(str_detect(Sample,"LIVER_PRIMA")) %>% select(c(1,3,6,8,12))
+sample_size_Prima_liver <- nrow(riva_Prima_liver)
+riva_Prima_liver[2:5] <- riva_Prima_liver[2:5] > 0.1
+riva_Prima_liver[2:5] <- riva_Prima_liver[2:5]*1
+
+all_combo <- riva_Prima_liver %>% tidyr::expand(sig1=unique(colnames(riva_Prima_liver[2:5])),sig2=unique(colnames(riva_Prima_liver[2:5])))
+
+sample_sig_Prima_liver <- reshape2::melt(riva_Prima_liver, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_Prima_liver$Signature <- unfactor(sample_sig_Prima_liver$Signature)
+sample_sig_Prima_liver <- sample_sig_Prima_liver[order(sample_sig_Prima_liver$Sample, decreasing = FALSE),]
+
+cooc_sig_Prima_liver <- sample_sig_Prima_liver %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_Prima_liver_count <- cooc_sig_Prima_liver %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_Prima_liver_count <- cooc_sig_Prima_liver_count %>% ungroup()
+cooc_sig_Prima_liver_count$sig1 <- unlist(cooc_sig_Prima_liver_count$sig1)
+cooc_sig_Prima_liver_count$sig2 <- unlist(cooc_sig_Prima_liver_count$sig2)
+cooc_sig_Prima_liver_count <- cooc_sig_Prima_liver_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_Prima_liver_count$n, cooc_sig_Prima_liver_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_Prima_liver_count$sig1)))
+cooc_sig_Prima_liver_count['max'] <- l
+
+cooc_sig_Prima_liver_count <- cooc_sig_Prima_liver_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(riva_Prima_liver),3))) #prop will be out of the total nb of samples
+
+mat_Prima_liver <- matrix(cooc_sig_Prima_liver_count$prop,nrow=length(unique(cooc_sig_Prima_liver_count$sig1)),ncol=length(unique(cooc_sig_Prima_liver_count$sig2)),
+                       dimnames=list(
+                         sig1=unique(cooc_sig_Prima_liver_count$sig1),
+                         sig2=unique(cooc_sig_Prima_liver_count$sig2)
+                       ))
+
+order_Prima_liver <- c("mSBS5", "mSBS40", "mSBS18", "mSBS_N3")
+mat_Prima_liver <- mat_Prima_liver[order_Prima_liver , order_Prima_liver]
+
+mat_Prima_liver[lower.tri(mat_Prima_liver)] <- NA
+mat_Prima_liver <- reshape2::melt(mat_Prima_liver, na.rm = TRUE)
+mat_Prima_liver <- merge(mat_Prima_liver, cooc_sig_Prima_liver_count, by=c('sig1','sig2'))
+
+plot_Prima_liver <- ggplot(mat_Prima_liver, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in primaclone-exposed liver tumors (n = ",sample_size_Prima_liver," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=8),legend.text = element_text(size=8),legend.spacing.y =unit(0.1, 'cm'),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=9))
+
+
+## liver spontaneous tumor samples only with primaclone non 0 cooc-values
+riva_spont_liver2 <- mutsig_carcinogens_mice_SBS %>% filter(str_detect(Sample,"SPONT"), str_detect(Sample,"LIVER")) %>% select(c(1,3,6,8,12))
+sample_size_spont_liver2 <- nrow(riva_spont_liver2)
+riva_spont_liver2[2:5] <- riva_spont_liver2[2:5] > 0.1
+riva_spont_liver2[2:5] <- riva_spont_liver2[2:5]*1
+
+all_combo <- riva_spont_liver2 %>% tidyr::expand(sig1=unique(colnames(riva_spont_liver2[2:5])),sig2=unique(colnames(riva_spont_liver2[2:5])))
+
+sample_sig_liver2 <- reshape2::melt(riva_spont_liver2, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_liver2$Signature <- unfactor(sample_sig_liver2$Signature)
+sample_sig_liver2 <- sample_sig_liver2[order(sample_sig_liver2$Sample, decreasing = FALSE),]
+
+cooc_sig_liver2 <- sample_sig_liver2 %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_liver_count2 <- cooc_sig_liver2 %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_liver_count2 <- cooc_sig_liver_count2 %>% ungroup()
+cooc_sig_liver_count2$sig1 <- unlist(cooc_sig_liver_count2$sig1)
+cooc_sig_liver_count2$sig2 <- unlist(cooc_sig_liver_count2$sig2)
+cooc_sig_liver_count2 <- cooc_sig_liver_count2 %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_liver_count2$n, cooc_sig_liver_count2$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_liver_count2$sig1)))
+cooc_sig_liver_count2['max'] <- l
+
+cooc_sig_liver_count2 <- cooc_sig_liver_count2 %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(riva_spont_liver2),3))) #prop will be out of the total nb of samples
+
+
+mat_liver2 <- matrix(cooc_sig_liver_count2$prop,nrow=length(unique(cooc_sig_liver_count2$sig1)),ncol=length(unique(cooc_sig_liver_count2$sig2)),
+                    dimnames=list(
+                      sig1=unique(cooc_sig_liver_count2$sig1),
+                      sig2=unique(cooc_sig_liver_count2$sig2)
+                    ))
+
+
+order_spont_liver2 <- c("mSBS5", "mSBS40", "mSBS18", "mSBS_N3")
+mat_liver2 <- mat_liver2[order_spont_liver2 , order_spont_liver2]
+
+
+mat_liver2[lower.tri(mat_liver2)] <- NA
+mat_liver2 <- reshape2::melt(mat_liver2, na.rm = TRUE)
+mat_liver2 <- merge(mat_liver2, cooc_sig_liver_count2, by=c('sig1','sig2'))
+
+
+plot_liver2 <- ggplot(mat_liver2, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in spontaneous liver tumors (n = ",sample_size_spont_liver2," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=8),legend.text = element_text(size=8),legend.spacing.y =unit(0.1, 'cm'),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=9)) 
+
+
+plot_liver2 + plot_Prima_liver
+```
+```{r cooc riva prima plot, echo=FALSE}
+#ggPrima <- (plot_liver2 + plot_Prima_liver)
+#ggsave("FigS_riva_Prima.svg",ggPrima + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(face = 'bold')), height = 3,width = 3*3.5)
+```
+
+
+We can observe the increase of signatures SBS5,40 and 18 between samples without and with primaclone exposure.
+
+We have repeated this analysis for other chemicals from the data : Vinylidene chloride (VDC), cumene, bromochloroacetic acid, G. biloba extract, and trichloropropane (TCP).
+
+```{r cooc riva VDC}
+# lung VDC
+
+riva_VDC_lung <- mutsig_carcinogens_mice_SBS %>% filter(str_detect(Sample,"LUNG_VINY")) %>% select(c(1:12))
+sample_size_VDC_lung <- nrow(riva_VDC_lung)
+riva_VDC_lung[2:12] <- riva_VDC_lung[2:12] > 0.1
+riva_VDC_lung[2:12] <- riva_VDC_lung[2:12]*1
+
+#remove sigs mSBS42 and mSBS_N2 (they are empty)
+riva_VDC_lung <- riva_VDC_lung %>% select(!c("mSBS42","mSBS_N2"))
+
+all_combo <- riva_VDC_lung %>% tidyr::expand(sig1=unique(colnames(riva_VDC_lung[2:10])),sig2=unique(colnames(riva_VDC_lung[2:10])))
+
+sample_sig_VDC_lung <- reshape2::melt(riva_VDC_lung, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_VDC_lung$Signature <- unfactor(sample_sig_VDC_lung$Signature)
+sample_sig_VDC_lung <- sample_sig_VDC_lung[order(sample_sig_VDC_lung$Sample, decreasing = FALSE),]
+
+cooc_sig_VDC_lung <- sample_sig_VDC_lung %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_VDC_lung_count <- cooc_sig_VDC_lung %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_VDC_lung_count <- cooc_sig_VDC_lung_count %>% ungroup()
+cooc_sig_VDC_lung_count$sig1 <- unlist(cooc_sig_VDC_lung_count$sig1)
+cooc_sig_VDC_lung_count$sig2 <- unlist(cooc_sig_VDC_lung_count$sig2)
+cooc_sig_VDC_lung_count <- cooc_sig_VDC_lung_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_VDC_lung_count$n, cooc_sig_VDC_lung_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_VDC_lung_count$sig1)))
+cooc_sig_VDC_lung_count['max'] <- l
+
+cooc_sig_VDC_lung_count <- cooc_sig_VDC_lung_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(riva_VDC_lung),3))) #prop will be out of the total nb of samples
+
+mat_VDC_lung <- matrix(cooc_sig_VDC_lung_count$prop,nrow=length(unique(cooc_sig_VDC_lung_count$sig1)),ncol=length(unique(cooc_sig_VDC_lung_count$sig2)),
+                       dimnames=list(
+                         sig1=unique(cooc_sig_VDC_lung_count$sig1),
+                         sig2=unique(cooc_sig_VDC_lung_count$sig2)
+                       ))
+
+order_VDC_lung <- c("mSBS1", "mSBS5", "mSBS40", "mSBS12", "mSBS17", "mSBS18", "mSBS19", "mSBS_N1", "mSBS_N3")
+mat_VDC_lung <- mat_VDC_lung[order_VDC_lung , order_VDC_lung]
+
+mat_VDC_lung[lower.tri(mat_VDC_lung)] <- NA
+mat_VDC_lung <- reshape2::melt(mat_VDC_lung, na.rm = TRUE)
+mat_VDC_lung <- merge(mat_VDC_lung, cooc_sig_VDC_lung_count, by=c('sig1','sig2'))
+
+plot_VDC_lung <- ggplot(mat_VDC_lung, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in VDC-exposed lung tumors (n = ",sample_size_VDC_lung," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=8),legend.text = element_text(size=8),legend.spacing.y =unit(0.1, 'cm'),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=9))
+
+
+# liver VDC
+
+riva_VDC_liver <- mutsig_carcinogens_mice_SBS %>% filter(str_detect(Sample,"LIVER_VINY")) %>% select(c(1:12))
+sample_size_VDC_liver <- nrow(riva_VDC_liver)
+riva_VDC_liver[2:12] <- riva_VDC_liver[2:12] > 0.1
+riva_VDC_liver[2:12] <- riva_VDC_liver[2:12]*1
+
+#remove sigs mSBS42 and mSBS_N2 (they are empty)
+riva_VDC_liver <- riva_VDC_liver %>% select(!c("mSBS42","mSBS_N2"))
+
+all_combo <- riva_VDC_liver %>% tidyr::expand(sig1=unique(colnames(riva_VDC_liver[2:10])),sig2=unique(colnames(riva_VDC_liver[2:10])))
+
+sample_sig_VDC_liver <- reshape2::melt(riva_VDC_liver, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_VDC_liver$Signature <- unfactor(sample_sig_VDC_liver$Signature)
+sample_sig_VDC_liver <- sample_sig_VDC_liver[order(sample_sig_VDC_liver$Sample, decreasing = FALSE),]
+
+cooc_sig_VDC_liver <- sample_sig_VDC_liver %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_VDC_liver_count <- cooc_sig_VDC_liver %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_VDC_liver_count <- cooc_sig_VDC_liver_count %>% ungroup()
+cooc_sig_VDC_liver_count$sig1 <- unlist(cooc_sig_VDC_liver_count$sig1)
+cooc_sig_VDC_liver_count$sig2 <- unlist(cooc_sig_VDC_liver_count$sig2)
+cooc_sig_VDC_liver_count <- cooc_sig_VDC_liver_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_VDC_liver_count$n, cooc_sig_VDC_liver_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_VDC_liver_count$sig1)))
+cooc_sig_VDC_liver_count['max'] <- l
+
+cooc_sig_VDC_liver_count <- cooc_sig_VDC_liver_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(riva_VDC_liver),3))) #prop will be out of the total nb of samples
+
+mat_VDC_liver <- matrix(cooc_sig_VDC_liver_count$prop,nrow=length(unique(cooc_sig_VDC_liver_count$sig1)),ncol=length(unique(cooc_sig_VDC_liver_count$sig2)),
+                       dimnames=list(
+                         sig1=unique(cooc_sig_VDC_liver_count$sig1),
+                         sig2=unique(cooc_sig_VDC_liver_count$sig2)
+                       ))
+
+order_VDC_liver <- c("mSBS1", "mSBS5", "mSBS40", "mSBS12", "mSBS17", "mSBS18", "mSBS19", "mSBS_N1", "mSBS_N3")
+mat_VDC_liver <- mat_VDC_liver[order_VDC_liver , order_VDC_liver]
+
+mat_VDC_liver[lower.tri(mat_VDC_liver)] <- NA
+mat_VDC_liver <- reshape2::melt(mat_VDC_liver, na.rm = TRUE)
+mat_VDC_liver <- merge(mat_VDC_liver, cooc_sig_VDC_liver_count, by=c('sig1','sig2'))
+
+plot_VDC_liver <- ggplot(mat_VDC_liver, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in VDC-exposed liver tumors (n = ",sample_size_VDC_liver," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=8),legend.text = element_text(size=8),legend.spacing.y =unit(0.1, 'cm'),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=9))
+
+
+(plot_lung + plot_VDC_lung)/(plot_liver + plot_VDC_liver)
+```
+```{r cooc riva VDC plot, echo=FALSE}
+#ggrivaCoocVDC <- (plot_lung + plot_VDC_lung)/(plot_liver + plot_VDC_liver)
+#ggsave("FigS_riva_cooc_VDC.svg",ggrivaCoocVDC + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(face = 'bold')), height = 2*3,width = 3*3.5)
+```
+
+```{r cooc riva cumene}
+# liver cumene
+
+riva_Cu_liver <- mutsig_carcinogens_mice_SBS %>% filter(str_detect(Sample,"LIVER_CU")) %>% select(c(1:12))
+sample_size_Cu_liver <- nrow(riva_Cu_liver)
+riva_Cu_liver[2:12] <- riva_Cu_liver[2:12] > 0.1
+riva_Cu_liver[2:12] <- riva_Cu_liver[2:12]*1
+
+#remove sigs mSBS42 and mSBS_N2 (they are empty)
+riva_Cu_liver <- riva_Cu_liver %>% select(!c("mSBS42","mSBS_N2"))
+
+all_combo <- riva_Cu_liver %>% tidyr::expand(sig1=unique(colnames(riva_Cu_liver[2:10])),sig2=unique(colnames(riva_Cu_liver[2:10])))
+
+sample_sig_Cu_liver <- reshape2::melt(riva_Cu_liver, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_Cu_liver$Signature <- unfactor(sample_sig_Cu_liver$Signature)
+sample_sig_Cu_liver <- sample_sig_Cu_liver[order(sample_sig_Cu_liver$Sample, decreasing = FALSE),]
+
+cooc_sig_Cu_liver <- sample_sig_Cu_liver %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_Cu_liver_count <- cooc_sig_Cu_liver %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_Cu_liver_count <- cooc_sig_Cu_liver_count %>% ungroup()
+cooc_sig_Cu_liver_count$sig1 <- unlist(cooc_sig_Cu_liver_count$sig1)
+cooc_sig_Cu_liver_count$sig2 <- unlist(cooc_sig_Cu_liver_count$sig2)
+cooc_sig_Cu_liver_count <- cooc_sig_Cu_liver_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_Cu_liver_count$n, cooc_sig_Cu_liver_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_Cu_liver_count$sig1)))
+cooc_sig_Cu_liver_count['max'] <- l
+
+cooc_sig_Cu_liver_count <- cooc_sig_Cu_liver_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(riva_Cu_liver),3))) #prop will be out of the total nb of samples
+
+mat_Cu_liver <- matrix(cooc_sig_Cu_liver_count$prop,nrow=length(unique(cooc_sig_Cu_liver_count$sig1)),ncol=length(unique(cooc_sig_Cu_liver_count$sig2)),
+                        dimnames=list(
+                          sig1=unique(cooc_sig_Cu_liver_count$sig1),
+                          sig2=unique(cooc_sig_Cu_liver_count$sig2)
+                        ))
+
+order_Cu_liver <- c("mSBS1", "mSBS5", "mSBS40", "mSBS12", "mSBS17", "mSBS18", "mSBS19", "mSBS_N1", "mSBS_N3")
+mat_Cu_liver <- mat_Cu_liver[order_Cu_liver , order_Cu_liver]
+
+mat_Cu_liver[lower.tri(mat_Cu_liver)] <- NA
+mat_Cu_liver <- reshape2::melt(mat_Cu_liver, na.rm = TRUE)
+mat_Cu_liver <- merge(mat_Cu_liver, cooc_sig_Cu_liver_count, by=c('sig1','sig2'))
+
+plot_Cu_liver <- ggplot(mat_Cu_liver, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in cumene exposed liver tumors (n = ",sample_size_Cu_liver," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=8),legend.text = element_text(size=8),legend.spacing.y =unit(0.1, 'cm'),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=9))
+
+
+plot_liver + plot_Cu_liver
+```
+```{r cooc riva cumene plot, echo=FALSE}
+#ggCu <- (plot_liver + plot_Cu_liver)
+#ggsave("FigS_riva_Cu.svg",ggCu + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(face = 'bold')), height = 3,width = 3*3.5)
+```
+
+```{r cooc riva G. biloba}
+# liver G. biloba
+
+riva_bilo_liver <- mutsig_carcinogens_mice_SBS %>% filter(str_detect(Sample,"LIVER_GINKGO_BILOBA")) %>% select(c(1:12))
+sample_size_bilo_liver <- nrow(riva_bilo_liver)
+riva_bilo_liver[2:12] <- riva_bilo_liver[2:12] > 0.1
+riva_bilo_liver[2:12] <- riva_bilo_liver[2:12]*1
+
+#remove sigs mSBS42 and mSBS_N2 (they are empty)
+riva_bilo_liver <- riva_bilo_liver %>% select(!c("mSBS42","mSBS_N2"))
+
+all_combo <- riva_bilo_liver %>% tidyr::expand(sig1=unique(colnames(riva_bilo_liver[2:10])),sig2=unique(colnames(riva_bilo_liver[2:10])))
+
+sample_sig_bilo_liver <- reshape2::melt(riva_bilo_liver, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_bilo_liver$Signature <- unfactor(sample_sig_bilo_liver$Signature)
+sample_sig_bilo_liver <- sample_sig_bilo_liver[order(sample_sig_bilo_liver$Sample, decreasing = FALSE),]
+
+cooc_sig_bilo_liver <- sample_sig_bilo_liver %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_bilo_liver_count <- cooc_sig_bilo_liver %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_bilo_liver_count <- cooc_sig_bilo_liver_count %>% ungroup()
+cooc_sig_bilo_liver_count$sig1 <- unlist(cooc_sig_bilo_liver_count$sig1)
+cooc_sig_bilo_liver_count$sig2 <- unlist(cooc_sig_bilo_liver_count$sig2)
+cooc_sig_bilo_liver_count <- cooc_sig_bilo_liver_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_bilo_liver_count$n, cooc_sig_bilo_liver_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_bilo_liver_count$sig1)))
+cooc_sig_bilo_liver_count['max'] <- l
+
+cooc_sig_bilo_liver_count <- cooc_sig_bilo_liver_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(riva_bilo_liver),3))) #prop will be out of the total nb of samples
+
+mat_bilo_liver <- matrix(cooc_sig_bilo_liver_count$prop,nrow=length(unique(cooc_sig_bilo_liver_count$sig1)),ncol=length(unique(cooc_sig_bilo_liver_count$sig2)),
+                          dimnames=list(
+                            sig1=unique(cooc_sig_bilo_liver_count$sig1),
+                            sig2=unique(cooc_sig_bilo_liver_count$sig2)
+                          ))
+
+order_bilo_liver <- c("mSBS1", "mSBS5", "mSBS40", "mSBS12", "mSBS17", "mSBS18", "mSBS19", "mSBS_N1", "mSBS_N3")
+mat_bilo_liver <- mat_bilo_liver[order_bilo_liver , order_bilo_liver]
+
+mat_bilo_liver[lower.tri(mat_bilo_liver)] <- NA
+mat_bilo_liver <- reshape2::melt(mat_bilo_liver, na.rm = TRUE)
+mat_bilo_liver <- merge(mat_bilo_liver, cooc_sig_bilo_liver_count, by=c('sig1','sig2'))
+
+plot_bilo_liver <- ggplot(mat_bilo_liver, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in G. biloba extract exposed liver tumors (n = ",sample_size_bilo_liver," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=8),legend.text = element_text(size=8),legend.spacing.y =unit(0.1, 'cm'),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=9))
+
+
+plot_liver + plot_bilo_liver
+```
+```{r cooc riva bilo plot, echo=FALSE}
+#ggbilo <- (plot_liver + plot_bilo_liver)
+#ggsave("FigS_riva_bilo.svg",ggbilo + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(face = 'bold')), height = 3,width = 3*3.5)
+```
+
+```{r cooc riva brom acid}
+# liver Bromochloroacetic acid
+
+riva_Br_liver <- mutsig_carcinogens_mice_SBS %>% filter(str_detect(Sample,"LIVER_BROM")) %>% select(c(1:12))
+sample_size_Br_liver <- nrow(riva_Br_liver)
+riva_Br_liver[2:12] <- riva_Br_liver[2:12] > 0.1
+riva_Br_liver[2:12] <- riva_Br_liver[2:12]*1
+
+#remove sigs mSBS42 and mSBS_N2 (they are empty)
+riva_Br_liver <- riva_Br_liver %>% select(!c("mSBS42","mSBS_N2"))
+
+all_combo <- riva_Br_liver %>% tidyr::expand(sig1=unique(colnames(riva_Br_liver[2:10])),sig2=unique(colnames(riva_Br_liver[2:10])))
+
+sample_sig_Br_liver <- reshape2::melt(riva_Br_liver, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_Br_liver$Signature <- unfactor(sample_sig_Br_liver$Signature)
+sample_sig_Br_liver <- sample_sig_Br_liver[order(sample_sig_Br_liver$Sample, decreasing = FALSE),]
+
+cooc_sig_Br_liver <- sample_sig_Br_liver %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_Br_liver_count <- cooc_sig_Br_liver %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_Br_liver_count <- cooc_sig_Br_liver_count %>% ungroup()
+cooc_sig_Br_liver_count$sig1 <- unlist(cooc_sig_Br_liver_count$sig1)
+cooc_sig_Br_liver_count$sig2 <- unlist(cooc_sig_Br_liver_count$sig2)
+cooc_sig_Br_liver_count <- cooc_sig_Br_liver_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_Br_liver_count$n, cooc_sig_Br_liver_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_Br_liver_count$sig1)))
+cooc_sig_Br_liver_count['max'] <- l
+
+cooc_sig_Br_liver_count <- cooc_sig_Br_liver_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(riva_Br_liver),3))) #prop will be out of the total nb of samples
+
+mat_Br_liver <- matrix(cooc_sig_Br_liver_count$prop,nrow=length(unique(cooc_sig_Br_liver_count$sig1)),ncol=length(unique(cooc_sig_Br_liver_count$sig2)),
+                       dimnames=list(
+                         sig1=unique(cooc_sig_Br_liver_count$sig1),
+                         sig2=unique(cooc_sig_Br_liver_count$sig2)
+                       ))
+
+order_Br_liver <- c("mSBS1", "mSBS5", "mSBS40", "mSBS12", "mSBS17", "mSBS18", "mSBS19", "mSBS_N1", "mSBS_N3")
+mat_Br_liver <- mat_Br_liver[order_Br_liver , order_Br_liver]
+
+mat_Br_liver[lower.tri(mat_Br_liver)] <- NA
+mat_Br_liver <- reshape2::melt(mat_Br_liver, na.rm = TRUE)
+mat_Br_liver <- merge(mat_Br_liver, cooc_sig_Br_liver_count, by=c('sig1','sig2'))
+
+plot_Br_liver <- ggplot(mat_Br_liver, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in bromochloroacetic acid exposed liver tumors (n = ",sample_size_Br_liver," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=8),legend.text = element_text(size=8),legend.spacing.y =unit(0.1, 'cm'),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=9))
+
+
+plot_liver + plot_Br_liver
+```
+```{r cooc riva Br plot, echo=FALSE}
+#ggBr <- (plot_liver + plot_Br_liver)
+#ggsave("FigS_riva_Br.svg",ggBr + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(face = 'bold')), height = 3,width = 3*3.5)
+```
+
+```{r cooc riva TCP}
+# liver TCP
+
+riva_TCP_liver <- mutsig_carcinogens_mice_SBS %>% filter(str_detect(Sample,"LIVER_1,2,3_TRICHLOROPROPANE")) %>% select(c(1:12))
+sample_size_TCP_liver <- nrow(riva_TCP_liver)
+riva_TCP_liver[2:12] <- riva_TCP_liver[2:12] > 0.1
+riva_TCP_liver[2:12] <- riva_TCP_liver[2:12]*1
+
+#remove sigs mSBS42 and mSBS_N2 (they are empty)
+riva_TCP_liver <- riva_TCP_liver %>% select(!c("mSBS42","mSBS_N2"))
+
+all_combo <- riva_TCP_liver %>% tidyr::expand(sig1=unique(colnames(riva_TCP_liver[2:10])),sig2=unique(colnames(riva_TCP_liver[2:10])))
+
+sample_sig_TCP_liver <- reshape2::melt(riva_TCP_liver, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_TCP_liver$Signature <- unfactor(sample_sig_TCP_liver$Signature)
+sample_sig_TCP_liver <- sample_sig_TCP_liver[order(sample_sig_TCP_liver$Sample, decreasing = FALSE),] 
+
+cooc_sig_TCP_liver <- sample_sig_TCP_liver %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_TCP_liver_count <- cooc_sig_TCP_liver %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_TCP_liver_count <- cooc_sig_TCP_liver_count %>% ungroup()
+cooc_sig_TCP_liver_count$sig1 <- unlist(cooc_sig_TCP_liver_count$sig1)
+cooc_sig_TCP_liver_count$sig2 <- unlist(cooc_sig_TCP_liver_count$sig2)
+cooc_sig_TCP_liver_count <- cooc_sig_TCP_liver_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_TCP_liver_count$n, cooc_sig_TCP_liver_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_TCP_liver_count$sig1)))
+cooc_sig_TCP_liver_count['max'] <- l
+
+cooc_sig_TCP_liver_count <- cooc_sig_TCP_liver_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(riva_TCP_liver),3))) #prop will be out of the total nb of samples
+
+mat_TCP_liver <- matrix(cooc_sig_TCP_liver_count$prop,nrow=length(unique(cooc_sig_TCP_liver_count$sig1)),ncol=length(unique(cooc_sig_TCP_liver_count$sig2)),
+                        dimnames=list(
+                          sig1=unique(cooc_sig_TCP_liver_count$sig1),
+                          sig2=unique(cooc_sig_TCP_liver_count$sig2)
+                        ))
+
+order_TCP_liver <- c("mSBS1", "mSBS5", "mSBS40", "mSBS12", "mSBS17", "mSBS18", "mSBS19", "mSBS_N1", "mSBS_N3")
+mat_TCP_liver <- mat_TCP_liver[order_TCP_liver , order_TCP_liver]
+
+mat_TCP_liver[lower.tri(mat_TCP_liver)] <- NA
+mat_TCP_liver <- reshape2::melt(mat_TCP_liver, na.rm = TRUE)
+mat_TCP_liver <- merge(mat_TCP_liver, cooc_sig_TCP_liver_count, by=c('sig1','sig2'))
+
+plot_TCP_liver <- ggplot(mat_TCP_liver, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in TCP-exposed liver tumors (n = ",sample_size_TCP_liver," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=8),legend.text = element_text(size=8),legend.spacing.y =unit(0.1, 'cm'),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=9))
+
+
+plot_liver + plot_TCP_liver
+```
+```{r cooc riva TCP plot, echo=FALSE}
+#ggTCP <- (plot_liver + plot_TCP_liver)
+#ggsave("FigS_riva_TCP.svg",ggTCP + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(face = 'bold')), height = 3,width = 3*3.5)
+```
+
+We then represented the co-occurrence of signatures in patients without vs with professional exposure to asbestos (Magiante et al. 2023 ; <https://www.nature.com/articles/s41588-023-01321-1>).
+
+```{r cooc mesomics}
+meso = MESOMICS_CN_SBS[,str_detect(colnames(MESOMICS_CN_SBS),"^CN[0-9]+") ]
+meso = sweep(meso,1,rowSums(meso),"/")
+meso = bind_cols(Sample=MESOMICS_CN_SBS$Sample , Professional.Asbestos=MESOMICS_CN_SBS$Professional.Asbestos, as_tibble(meso))
+meso = meso[colSums(apply(meso[,-1],1,is.na))==0,] %>% arrange(Professional.Asbestos)
+
+## Unexposed samples
+meso_nexp <- meso %>% filter(str_detect(Professional.Asbestos,"Non")) %>% select(c(1,3:9))
+sample_size_meso_nexp <- nrow(meso_nexp)
+meso_nexp[2:8] <- meso_nexp[2:8] > 0.1
+meso_nexp[2:8] <- meso_nexp[2:8]*1
+
+all_combo <- meso_nexp %>% tidyr::expand(sig1=unique(colnames(meso_nexp[2:8])),sig2=unique(colnames(meso_nexp[2:8])))
+
+sample_sig_meso_nexp <- reshape2::melt(meso_nexp, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_meso_nexp$Signature <- unfactor(sample_sig_meso_nexp$Signature)
+sample_sig_meso_nexp <- sample_sig_meso_nexp[order(sample_sig_meso_nexp$Sample, decreasing = FALSE),]
+
+cooc_sig_meso_nexp <- sample_sig_meso_nexp %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_meso_nexp_count <- cooc_sig_meso_nexp %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_meso_nexp_count <- cooc_sig_meso_nexp_count %>% ungroup()
+cooc_sig_meso_nexp_count$sig1 <- unlist(cooc_sig_meso_nexp_count$sig1)
+cooc_sig_meso_nexp_count$sig2 <- unlist(cooc_sig_meso_nexp_count$sig2)
+cooc_sig_meso_nexp_count <- cooc_sig_meso_nexp_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_meso_nexp_count$n, cooc_sig_meso_nexp_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_meso_nexp_count$sig1)))
+cooc_sig_meso_nexp_count['max'] <- l
+
+cooc_sig_meso_nexp_count <- cooc_sig_meso_nexp_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(meso_nexp),3))) #prop will be out of the total nb of samples
+
+mat_meso_nexp <- matrix(cooc_sig_meso_nexp_count$prop,nrow=length(unique(cooc_sig_meso_nexp_count$sig1)),ncol=length(unique(cooc_sig_meso_nexp_count$sig2)),
+                 dimnames=list(
+                   sig1=unique(cooc_sig_meso_nexp_count$sig1),
+                   sig2=unique(cooc_sig_meso_nexp_count$sig2)
+                 ))
+
+order_meso_nexp <- c("CN1", "CN2", "CN5", "CN9", "CN15", "CN18", "CN19")
+mat_meso_nexp <- mat_meso_nexp[order_meso_nexp , order_meso_nexp]
+
+mat_meso_nexp[lower.tri(mat_meso_nexp)] <- NA
+mat_meso_nexp <- reshape2::melt(mat_meso_nexp, na.rm = TRUE)
+mat_meso_nexp <- merge(mat_meso_nexp, cooc_sig_meso_nexp_count, by=c('sig1','sig2'))
+
+plot_meso_nexp <- ggplot(mat_meso_nexp, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in tumors unexposed to asbestos (n = ",sample_size_meso_nexp," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=9),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=10)) 
+
+
+## Exposed samples
+meso_exp <- meso %>% filter(str_detect(Professional.Asbestos,"Exp")) %>% select(c(1,3:9))
+sample_size_meso_exp <- nrow(meso_exp)
+meso_exp[2:8] <- meso_exp[2:8] > 0.1
+meso_exp[2:8] <- meso_exp[2:8]*1
+
+all_combo <- meso_exp %>% tidyr::expand(sig1=unique(colnames(meso_exp[2:8])),sig2=unique(colnames(meso_exp[2:8])))
+
+sample_sig_meso_exp <- reshape2::melt(meso_exp, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_meso_exp$Signature <- unfactor(sample_sig_meso_exp$Signature)
+sample_sig_meso_exp <- sample_sig_meso_exp[order(sample_sig_meso_exp$Sample, decreasing = FALSE),]
+
+cooc_sig_meso_exp <- sample_sig_meso_exp %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_meso_exp_count <- cooc_sig_meso_exp %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_meso_exp_count <- cooc_sig_meso_exp_count %>% ungroup()
+cooc_sig_meso_exp_count$sig1 <- unlist(cooc_sig_meso_exp_count$sig1)
+cooc_sig_meso_exp_count$sig2 <- unlist(cooc_sig_meso_exp_count$sig2)
+cooc_sig_meso_exp_count <- cooc_sig_meso_exp_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_meso_exp_count$n, cooc_sig_meso_exp_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_meso_exp_count$sig1)))
+cooc_sig_meso_exp_count['max'] <- l
+
+cooc_sig_meso_exp_count <- cooc_sig_meso_exp_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(meso_exp),3))) #prop will be out of the total nb of samples
+
+mat_meso_exp <- matrix(cooc_sig_meso_exp_count$prop,nrow=length(unique(cooc_sig_meso_exp_count$sig1)),ncol=length(unique(cooc_sig_meso_exp_count$sig2)),
+                       dimnames=list(
+                         sig1=unique(cooc_sig_meso_exp_count$sig1),
+                         sig2=unique(cooc_sig_meso_exp_count$sig2)
+                       ))
+
+order_meso_exp <- c("CN1", "CN2", "CN5", "CN9", "CN15", "CN18", "CN19")
+mat_meso_exp <- mat_meso_exp[order_meso_exp , order_meso_exp]
+
+mat_meso_exp[lower.tri(mat_meso_exp)] <- NA
+mat_meso_exp <- reshape2::melt(mat_meso_exp, na.rm = TRUE)
+mat_meso_exp <- merge(mat_meso_exp, cooc_sig_meso_exp_count, by=c('sig1','sig2'))
+
+plot_meso_exp <- ggplot(mat_meso_exp, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in tumors exposed to asbestos (n = ",sample_size_meso_exp," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=9),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=10)) 
+
+plot_meso_nexp + plot_meso_exp
+```
+```{r cooc meso plot, echo=FALSE}
+#ggMesoCooc <- (plot_meso_nexp + plot_meso_exp)
+#ggsave("FigS_mesomics_cooc.svg",ggMesoCooc + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(face = 'bold')), height = 3,width = 3*3.5)
+```
+
+We also represented the co-occurrence of signatures in non-smokers without vs with exposure to second-hand smoke (Zhang et al. 2021).
+
+```{r cooc zhang}
+## Non-smokers
+zhang_ns <- zhang %>% filter(str_detect(passive_smoking,"Non")) %>% select(c(25:39))
+sample_size_ns <- nrow(zhang_ns)
+zhang_ns[2:15] <- zhang_ns[2:15] > 0.1
+zhang_ns[2:15] <- zhang_ns[2:15]*1
+
+all_combo <- zhang_ns %>% tidyr::expand(sig1=unique(colnames(zhang_ns[2:15])),sig2=unique(colnames(zhang_ns[2:15])))
+
+sample_sig_ns <- reshape2::melt(zhang_ns, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_ns$Signature <- unfactor(sample_sig_ns$Signature)
+sample_sig_ns <- sample_sig_ns[order(sample_sig_ns$Sample, decreasing = FALSE),]
+
+cooc_sig_ns <- sample_sig_ns %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_ns_count <- cooc_sig_ns %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_ns_count <- cooc_sig_ns_count %>% ungroup()
+cooc_sig_ns_count$sig1 <- unlist(cooc_sig_ns_count$sig1)
+cooc_sig_ns_count$sig2 <- unlist(cooc_sig_ns_count$sig2)
+cooc_sig_ns_count <- cooc_sig_ns_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_ns_count$n, cooc_sig_ns_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_ns_count$sig1)))
+cooc_sig_ns_count['max'] <- l
+
+cooc_sig_ns_count <- cooc_sig_ns_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(zhang_ns),3))) #prop will be out of the total nb of samples
+
+mat_ns <- matrix(cooc_sig_ns_count$prop,nrow=length(unique(cooc_sig_ns_count$sig1)),ncol=length(unique(cooc_sig_ns_count$sig2)),
+                    dimnames=list(
+                      sig1=unique(cooc_sig_ns_count$sig1),
+                      sig2=unique(cooc_sig_ns_count$sig2)
+                    ))
+
+order_ns <- c("SBS1", "SBS5", "SBS40", "SBS2", "SBS3", "SBS7a", "SBS7b", "SBS7c", "SBS7d", "SBS8", "SBS13", "SBS17a", "SBS17b", "SBS18")
+mat_ns <- mat_ns[order_ns , order_ns]
+
+mat_ns[lower.tri(mat_ns)] <- NA
+mat_ns <- reshape2::melt(mat_ns, na.rm = TRUE)
+mat_ns <- merge(mat_ns, cooc_sig_ns_count, by=c('sig1','sig2'))
+
+plot_ns <- ggplot(mat_ns, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in Non-smoker tumors (n = ",sample_size_ns," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=9),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=10)) 
+
+
+## Passive smokers
+zhang_ps <- zhang %>% filter(!str_detect(passive_smoking,"Non")) %>% select(c(25:39))
+sample_size_ps <- nrow(zhang_ps)
+zhang_ps[2:15] <- zhang_ps[2:15] > 0.1
+zhang_ps[2:15] <- zhang_ps[2:15]*1
+
+all_combo <- zhang_ns %>% tidyr::expand(sig1=unique(colnames(zhang_ns[2:15])),sig2=unique(colnames(zhang_ns[2:15])))
+
+sample_sig_ps <- reshape2::melt(zhang_ps, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_ps$Signature <- unfactor(sample_sig_ps$Signature)
+sample_sig_ps <- sample_sig_ps[order(sample_sig_ps$Sample, decreasing = FALSE),]
+
+cooc_sig_ps <- sample_sig_ps %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_ps_count <- cooc_sig_ps %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_ps_count <- cooc_sig_ps_count %>% ungroup()
+cooc_sig_ps_count$sig1 <- unlist(cooc_sig_ps_count$sig1)
+cooc_sig_ps_count$sig2 <- unlist(cooc_sig_ps_count$sig2)
+cooc_sig_ps_count <- cooc_sig_ps_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_ps_count$n, cooc_sig_ps_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_ps_count$sig1)))
+cooc_sig_ps_count['max'] <- l
+
+cooc_sig_ps_count <- cooc_sig_ps_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(zhang_ps),3))) #prop will be out of the total nb of samples
+
+mat_ps <- matrix(cooc_sig_ps_count$prop,nrow=length(unique(cooc_sig_ps_count$sig1)),ncol=length(unique(cooc_sig_ps_count$sig2)),
+                 dimnames=list(
+                   sig1=unique(cooc_sig_ps_count$sig1),
+                   sig2=unique(cooc_sig_ps_count$sig2)
+                 ))
+
+order_ps <- c("SBS1", "SBS5", "SBS40", "SBS2", "SBS3", "SBS7a", "SBS7b", "SBS7c", "SBS7d", "SBS8", "SBS13", "SBS17a", "SBS17b", "SBS18")
+mat_ps <- mat_ps[order_ps , order_ps]
+
+mat_ps[lower.tri(mat_ps)] <- NA
+mat_ps <- reshape2::melt(mat_ps, na.rm = TRUE)
+mat_ps <- merge(mat_ps, cooc_sig_ps_count, by=c('sig1','sig2'))
+
+plot_ps <- ggplot(mat_ps, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in Passive smoker tumors (n = ",sample_size_ps," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=9),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=10))
+
+plot_ns + plot_ps
+```
+```{r cooc zhang plot, echo=FALSE}
+#ggZhangCooc <- (plot_ns + plot_ps)
+#ggsave("FigS_zhang_cooc.svg",ggZhangCooc + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(face = 'bold')), height = 3,width = 3*3.5)
+```
+
+Next, we represented the co-occurence of signatures in non-smoker vs smoker East Asian patients with adenocarcinoma (Chen et al. 2020 ; <https://www.nature.com/articles/s41588-019-0569-6>).
+
+```{r cooc chen}
+sig_data = readRDS("sig.res.Asian.RDS")
+meta = readxl::read_xlsx("41588_2019_569_MOESM3_ESM.xlsx", sheet = "TableS1", skip = 1)
+sigs = t(sig_data$contribution) %>% data.frame %>%tibble::rownames_to_column(var = "Patient.ID")
+chen = inner_join(meta, sigs)
+chen = chen[!is.na(chen$Smoker),]
+chen$Smoker = ifelse(chen$Smoker == "Yes", "Smoker", "Non-smoker")
+chen[,18:20] = chen[,18:20]/rowSums(chen[,18:20])
+
+## Smoker
+chen_s <- chen %>% filter(!str_detect(Smoker,"Non")) %>% select(c(1,18:20))
+sample_size_chen_s <- nrow(chen_s)
+chen_s[2:4] <- chen_s[2:4] > 0.1
+chen_s[2:4] <- chen_s[2:4]*1
+
+all_combo <- chen_s %>% tidyr::expand(sig1=unique(colnames(chen_s[2:4])),sig2=unique(colnames(chen_s[2:4])))
+
+sample_sig_chen_s <- reshape2::melt(chen_s, id.vars = "Patient.ID", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_chen_s$Signature <- unfactor(sample_sig_chen_s$Signature)
+
+cooc_sig_chen_s <- sample_sig_chen_s %>% group_by(Patient.ID) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_chen_s_count <- cooc_sig_chen_s %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_chen_s_count <- cooc_sig_chen_s_count %>% ungroup()
+cooc_sig_chen_s_count$sig1 <- unlist(cooc_sig_chen_s_count$sig1)
+cooc_sig_chen_s_count$sig2 <- unlist(cooc_sig_chen_s_count$sig2)
+cooc_sig_chen_s_count <- cooc_sig_chen_s_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_chen_s_count$n, cooc_sig_chen_s_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_chen_s_count$sig1)))
+cooc_sig_chen_s_count['max'] <- l
+
+cooc_sig_chen_s_count <- cooc_sig_chen_s_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(chen_s),3))) #prop will be out of the total nb of samples
+
+mat_chen_s <- matrix(cooc_sig_chen_s_count$prop,nrow=length(unique(cooc_sig_chen_s_count$sig1)),ncol=length(unique(cooc_sig_chen_s_count$sig2)),
+                       dimnames=list(
+                         sig1=unique(cooc_sig_chen_s_count$sig1),
+                         sig2=unique(cooc_sig_chen_s_count$sig2)
+                       ))
+
+mat_chen_s[lower.tri(mat_chen_s)] <- NA
+mat_chen_s <- reshape2::melt(mat_chen_s, na.rm = TRUE)
+mat_chen_s <- merge(mat_chen_s, cooc_sig_chen_s_count, by=c('sig1','sig2'))
+
+plot_chen_s <- ggplot(mat_chen_s, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in smoker tumors (n = ",sample_size_chen_s," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=9),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=10)) 
+
+## Non-smoker
+chen_ns <- chen %>% filter(str_detect(Smoker,"Non")) %>% select(c(1,18:20))
+sample_size_chen_ns <- nrow(chen_ns)
+chen_ns[2:4] <- chen_ns[2:4] > 0.1
+chen_ns[2:4] <- chen_ns[2:4]*1
+
+all_combo <- chen_ns %>% tidyr::expand(sig1=unique(colnames(chen_ns[2:4])),sig2=unique(colnames(chen_ns[2:4])))
+
+sample_sig_chen_ns <- reshape2::melt(chen_ns, id.vars = "Patient.ID", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_chen_ns$Signature <- unfactor(sample_sig_chen_ns$Signature)
+
+cooc_sig_chen_ns <- sample_sig_chen_ns %>% group_by(Patient.ID) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_chen_ns_count <- cooc_sig_chen_ns %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_chen_ns_count <- cooc_sig_chen_ns_count %>% ungroup()
+cooc_sig_chen_ns_count$sig1 <- unlist(cooc_sig_chen_ns_count$sig1)
+cooc_sig_chen_ns_count$sig2 <- unlist(cooc_sig_chen_ns_count$sig2)
+cooc_sig_chen_ns_count <- cooc_sig_chen_ns_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_chen_ns_count$n, cooc_sig_chen_ns_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_chen_ns_count$sig1)))
+cooc_sig_chen_ns_count['max'] <- l
+
+cooc_sig_chen_ns_count <- cooc_sig_chen_ns_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(chen_ns),3))) #prop will be out of the total nb of samples
+
+mat_chen_ns <- matrix(cooc_sig_chen_ns_count$prop,nrow=length(unique(cooc_sig_chen_ns_count$sig1)),ncol=length(unique(cooc_sig_chen_ns_count$sig2)),
+                     dimnames=list(
+                       sig1=unique(cooc_sig_chen_ns_count$sig1),
+                       sig2=unique(cooc_sig_chen_ns_count$sig2)
+                     ))
+
+mat_chen_ns[lower.tri(mat_chen_ns)] <- NA
+mat_chen_ns <- reshape2::melt(mat_chen_ns, na.rm = TRUE)
+mat_chen_ns <- merge(mat_chen_ns, cooc_sig_chen_ns_count, by=c('sig1','sig2'))
+
+plot_chen_ns <- ggplot(mat_chen_ns, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in non-smoker tumors (n = ",sample_size_chen_ns," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=9),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=10)) 
+
+plot_chen_ns + plot_chen_s
+```
+```{r cooc chen plot, echo=FALSE}
+#ggChenCooc <- (plot_chen_ns + plot_chen_s)
+#ggsave("FigS_chen_cooc.svg",ggChenCooc + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(face = 'bold')), height = 3,width = 3*3.5)
+```
+
+Finally, we represented the co-occurrence of signatures in esophageal squamous
+cell carcinoma (ESCC) patients in low vs high incidence countries (Moody et al. 2021 ; <https://www.nature.com/articles/s41588-021-00928-6>).
+
+```{r cooc ESCC}
+## High incidence
+ESCC_high <- ESCC_sig_activity %>% filter(str_detect(Incidence_Level,"High")) %>% select(c(3,4:10,12,13,15:22,24:29,31,37:39,41,42,46))
+sample_size_ESCC_high <- nrow(ESCC_high)
+ESCC_high[2:31] <- ESCC_high[2:31] > 0.1
+ESCC_high[2:31] <- ESCC_high[2:31]*1
+
+all_combo <- ESCC_high %>% tidyr::expand(sig1=unique(colnames(ESCC_high[2:31])),sig2=unique(colnames(ESCC_high[2:31])))
+
+sample_sig_ESCC_high <- reshape2::melt(ESCC_high, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_ESCC_high$Signature <- unfactor(sample_sig_ESCC_high$Signature)
+sample_sig_ESCC_high <- sample_sig_ESCC_high[order(sample_sig_ESCC_high$Sample, decreasing = FALSE),] 
+
+cooc_sig_ESCC_high <- sample_sig_ESCC_high %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_ESCC_high_count <- cooc_sig_ESCC_high %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_ESCC_high_count <- cooc_sig_ESCC_high_count %>% ungroup()
+cooc_sig_ESCC_high_count$sig1 <- unlist(cooc_sig_ESCC_high_count$sig1)
+cooc_sig_ESCC_high_count$sig2 <- unlist(cooc_sig_ESCC_high_count$sig2)
+cooc_sig_ESCC_high_count <- cooc_sig_ESCC_high_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_ESCC_high_count$n, cooc_sig_ESCC_high_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_ESCC_high_count$sig1)))
+cooc_sig_ESCC_high_count['max'] <- l
+
+cooc_sig_ESCC_high_count <- cooc_sig_ESCC_high_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(ESCC_high),3))) #prop will be out of the total nb of samples
+
+mat_ESCC_high <- matrix(cooc_sig_ESCC_high_count$prop,nrow=length(unique(cooc_sig_ESCC_high_count$sig1)),ncol=length(unique(cooc_sig_ESCC_high_count$sig2)),
+                        dimnames=list(
+                          sig1=unique(cooc_sig_ESCC_high_count$sig1),
+                          sig2=unique(cooc_sig_ESCC_high_count$sig2)
+                        ))
+
+order_ESCC_high <- c("SBS1", "SBS5", "SBS40", colnames(ESCC_high[-c(1,2,6,24)]))
+mat_ESCC_high <- mat_ESCC_high[order_ESCC_high , order_ESCC_high]
+
+mat_ESCC_high[lower.tri(mat_ESCC_high)] <- NA
+mat_ESCC_high <- reshape2::melt(mat_ESCC_high, na.rm = TRUE)
+mat_ESCC_high <- merge(mat_ESCC_high, cooc_sig_ESCC_high_count, by=c('sig1','sig2'))
+
+plot_ESCC_high <- ggplot(mat_ESCC_high, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in high incidence country tumors (n = ",sample_size_ESCC_high," samples)")) +
+  scale_color_gradient(low="blue",high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=9),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=10), axis.text=element_text(size=8) )
+
+## Low incidence
+ESCC_low <- ESCC_sig_activity %>% filter(str_detect(Incidence_Level,"Low")) %>% select(c(3,4:10,12,13,15:22,24:29,31,37:39,41,42,46))
+sample_size_ESCC_low <- nrow(ESCC_low)
+ESCC_low[2:31] <- ESCC_low[2:31] > 0.1
+ESCC_low[2:31] <- ESCC_low[2:31]*1
+
+all_combo <- ESCC_high %>% tidyr::expand(sig1=unique(colnames(ESCC_high[2:31])),sig2=unique(colnames(ESCC_high[2:31])))
+
+sample_sig_ESCC_low <- reshape2::melt(ESCC_low, id.vars = "Sample", variable.name = "Signature") %>% filter(value==1) %>% select(-value)
+sample_sig_ESCC_low$Signature <- unfactor(sample_sig_ESCC_low$Signature)
+sample_sig_ESCC_low <- sample_sig_ESCC_low[order(sample_sig_ESCC_low$Sample, decreasing = FALSE),]
+
+cooc_sig_ESCC_low <- sample_sig_ESCC_low %>% group_by(Sample) %>% tidyr::expand(sig1=nesting(Signature),sig2=nesting(Signature)) 
+
+cooc_sig_ESCC_low_count <- cooc_sig_ESCC_low %>% group_by(sig1,sig2) %>% dplyr::select(sig1,sig2) %>% tally()
+cooc_sig_ESCC_low_count <- cooc_sig_ESCC_low_count %>% ungroup()
+cooc_sig_ESCC_low_count$sig1 <- unlist(cooc_sig_ESCC_low_count$sig1)
+cooc_sig_ESCC_low_count$sig2 <- unlist(cooc_sig_ESCC_low_count$sig2)
+cooc_sig_ESCC_low_count <- cooc_sig_ESCC_low_count %>% complete(sig1=all_combo$sig1, sig2=all_combo$sig2, fill = list(n = 0))
+
+t <- tapply(cooc_sig_ESCC_low_count$n, cooc_sig_ESCC_low_count$sig1, max)
+t <- t %>% replace(is.na(.), 0)
+l <- list(rep(t, times=table(cooc_sig_ESCC_low_count$sig1)))
+cooc_sig_ESCC_low_count['max'] <- l
+
+cooc_sig_ESCC_low_count <- cooc_sig_ESCC_low_count %>% mutate(prop=case_when(max==0~0,TRUE~round(n/nrow(ESCC_low),3))) #prop will be out of the total nb of samples
+
+mat_ESCC_low <- matrix(cooc_sig_ESCC_low_count$prop,nrow=length(unique(cooc_sig_ESCC_low_count$sig1)),ncol=length(unique(cooc_sig_ESCC_low_count$sig2)),
+                        dimnames=list(
+                          sig1=unique(cooc_sig_ESCC_low_count$sig1),
+                          sig2=unique(cooc_sig_ESCC_low_count$sig2)
+                        ))
+
+order_ESCC_low <- c("SBS1", "SBS5", "SBS40", colnames(ESCC_high[-c(1,2,6,24)]))
+mat_ESCC_low <- mat_ESCC_low[order_ESCC_low , order_ESCC_low]
+
+mat_ESCC_low[lower.tri(mat_ESCC_low)] <- NA
+mat_ESCC_low <- reshape2::melt(mat_ESCC_low, na.rm = TRUE)
+mat_ESCC_low <- merge(mat_ESCC_low, cooc_sig_ESCC_low_count, by=c('sig1','sig2'))
+
+plot_ESCC_low <- ggplot(mat_ESCC_low, aes(x= sig1, y = sig2))+
+  geom_tile(fill = "white", color = "black")+
+  geom_point(aes(color = prop, size = ifelse(prop==0, NA, prop))) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  xlab(label = 'Signatures') +
+  ylab(label = 'Signatures') +
+  guides(color = guide_colorbar(title = "Proportion of co-occurrence", order=1)) +
+  guides(size = guide_legend(title = "Proportion of co-occurrence", order=2)) +
+  ggtitle(paste0("Co-occurrence of signatures in low incidence country tumors (n = ",sample_size_ESCC_low," samples)")) +
+  scale_color_gradient(low="blue", high="red", limits=c(0, 1)) +
+  scale_size_continuous(limits = c(0,1),range = c(0,5))+
+  theme(panel.grid = element_blank(),legend.title = element_text(size=9),legend.key.height= unit(0.35, 'cm'), plot.title = element_text(size=10), axis.text=element_text(size=8) )
+
+plot_ESCC_low + plot_ESCC_high
+```
+```{r cooc ESCC plot, echo=FALSE}
+#ggESCCooc <- (plot_ESCC_low + plot_ESCC_high)
+#ggsave("FigS_ESCC_cooc.svg",ggESCCooc + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(face = 'bold')), height = 5.5,width = 3*5)
+```
