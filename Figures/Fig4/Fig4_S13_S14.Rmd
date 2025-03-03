@@ -178,7 +178,7 @@ braf_spectrum  = get_SBS96_spectrum(transcript="ENSMUST00000002487.15",organism 
 
 Get the SBS spectrum of driver mutations, already computed in the paper (Sup Table):
 ```{r}
-drivers.mice = read_tsv("../MS_SVA/Data/RivaEtAl2020_github_snvsindrivers.txt",col_names = c("Sample","ID","chr","pos","ref","alt","gene")) %>% 
+drivers.mice = read_tsv("Data/RivaEtAl2020_github_snvsindrivers.txt",col_names = c("Sample","ID","chr","pos","ref","alt","gene")) %>% 
   mutate(organ = str_extract(Sample,"^[A-Z]+"), chr=paste0("chr",chr))
 
 table(drivers.mice$gene,drivers.mice$organ) # Most frequent genes are Braf and Hras in liver, Fgfr2, Kras and Braf in lung as in Figure 4 from Riva et al.
